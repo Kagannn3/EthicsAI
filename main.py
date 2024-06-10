@@ -1,3 +1,138 @@
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import random
+import matplotlib.pyplot as plt
+from torchvision import datasets, transforms
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Define the CNN model
+class CNN(nn.Module):
+    def __init__(self):
+        super(CNN, self).__init__()
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3)
+        self.fc1 = nn.Linear(64 * 5 * 5, 128)
+        self.fc2 = nn.Linear(128, 10)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.max_pool2d(x, 2, 2)
+        x = F.relu(self.conv2(x))
+        x = F.max_pool2d(x, 2, 2)
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+class StochasticPruningModel(nn.Module):
+    def __init__(self, model, prune_prob=0.1):
+        super(StochasticPruningModel, self).__init__()
+        self.model = model
+        self.prune_prob = prune_prob
+
+    def forward(self, x):
+        for layer in self.model.children(): 
+          # to iterate over the layers of the model stored within the StochasticPruningModel instance.
+            if isinstance(layer, nn.ReLU):
+              # to check if the current layer is an instance of nn.ReLU, which is typically the activation function used in neural networks.
+                mask = torch.rand_like(x) > self.prune_prob
+                x = layer(x) * mask.to(device)
+            else:
+                x = layer(x)
+        return x
+
+class DynamicEnsembleModel(nn.Module):
+    def __init__(self, models, subnetwork_prob=0.5):
+        super(DynamicEnsembleModel, self).__init__()
+        self.models = nn.ModuleList(models)
+        self.subnetwork_prob = subnetwork_prob
+
+    def forward(self, x):
+        active_models = [model for model in self.models if torch.rand(1).item() < self.subnetwork_prob]
+        outputs = [model(x) for model in active_models]
+        return sum(outputs) / len(outputs) if outputs else self.models[0](x)
+
+def random_padding_and_cropping(x, padding=4):
+    _, _, height, width = x.shape
+    crop_size = height
+    transform = transforms.Compose([
+        transforms.Pad(padding),
+        transforms.RandomCrop(crop_size)
+    ])
+    return transform(x)
+
+def show_images(images, title_texts):
+    cols = 5
+    rows = int(len(images) / cols) + 1
+    plt.figure(figsize=(30, 20))
+    index = 1
+    for image, title_text in zip(images, title_texts):
+        plt.subplot(rows, cols, index)
+        plt.imshow(image, cmap=plt.cm.gray)
+        if title_text != '':
+            plt.title(title_text, fontsize=15)
+        index += 1
+    plt.show()
+
+def normalize_data(x_train, y_train, x_test, y_test):
+    x_train = np.array(x_train)
+    x_test = np.array(x_test)
+
+    x_train = x_train / 255.0
+    x_test = x_test / 255.0
+
+    x_train = torch.tensor(x_train, dtype=torch.float32).unsqueeze(1)
+    y_train = torch.tensor(y_train, dtype=torch.long)
+    x_test = torch.tensor(x_test, dtype=torch.float32).unsqueeze(1)
+    y_test = torch.tensor(y_test, dtype=torch.long)
+
+    train_dataset = TensorDataset(x_train, y_train)
+    test_dataset = TensorDataset(x_test, y_test)
+
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False)
+    return train_loader, test_loader, x_test, y_test
+
+def fgsm_attack(image, epsilon, data_grad):
+    sign_data_grad = data_grad.sign()
+    perturbed_image = image + epsilon * sign_data_grad
+    perturbed_image = torch.clamp(perturbed_image, 0, 1)
+    return perturbed_image
+
+def imshow(img, title):
+    npimg = img.numpy()
+    plt.figure(figsize=(3, 3))
+    if npimg.shape[0] == 1:
+        npimg = npimg.squeeze()
+    plt.imshow(npimg, cmap='gray')
+    plt.title(title)
+    plt.show()
+
+def adversarial_logit_pairing(model, data, target, epsilon):
+    data.requires_grad = True
+    output_clean = model(data)
+    loss_clean = F.cross_entropy(output_clean, target)
+
+    # Perform FGSM attack
+    model.zero_grad()
+    loss_clean.backward(retain_graph=True)  # Retain the graph for later use
+    data_grad = data.grad.data
+    data_adv = fgsm_attack(data, epsilon, data_grad)
+
+    # Forward pass on adversarial examples
+    output_adv = model(data_adv)
+    loss_adv = F.cross_entropy(output_adv, target)
+
+    # Logit pairing loss
+    loss_alp = loss_adv + F.mse_loss(output_clean, output_adv)
+    return data_adv, loss_alp
+
 def main():
     transform = transforms.Compose([transforms.ToTensor()])
     train_dataset = datasets.MNIST(root='./data', train=True, transform=transform, download=True)
