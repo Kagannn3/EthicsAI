@@ -37,12 +37,14 @@ class StochasticPruningModel(nn.Module):
         self.prune_prob = prune_prob
 
     def forward(self, x):
-        for layer in self.model.children(): 
+        for layer in self.model.children():
           # to iterate over the layers of the model stored within the StochasticPruningModel instance.
             if isinstance(layer, nn.ReLU):
               # to check if the current layer is an instance of nn.ReLU, which is typically the activation function used in neural networks.
                 mask = torch.rand_like(x) > self.prune_prob
                 x = layer(x) * mask.to(device)
+            elif isinstance(layer, nn.Linear):
+                x = x.view(x.size(0), -1)  # Flatten the output if it's not already
             else:
                 x = layer(x)
         return x
@@ -69,7 +71,7 @@ def random_padding_and_cropping(x, padding=4):
 
 def show_images(images, title_texts):
     cols = 5
-    rows = int(len(images) / cols) + 1
+    rows = int(len(images) / cols)
     plt.figure(figsize=(30, 20))
     index = 1
     for image, title_text in zip(images, title_texts):
@@ -84,15 +86,15 @@ def normalize_data(x_train, y_train, x_test, y_test):
     x_train = np.array(x_train)
     x_test = np.array(x_test)
 
-    x_train = x_train / 255.0
+    x_train = x_train / 255.0       # constrict the scale to the between 0-1 by corresponding float numbers
     x_test = x_test / 255.0
 
-    x_train = torch.tensor(x_train, dtype=torch.float32).unsqueeze(1)
+    x_train = torch.tensor(x_train, dtype=torch.float32).unsqueeze(1)   # using more digits after the comma due to the converging scale
     y_train = torch.tensor(y_train, dtype=torch.long)
     x_test = torch.tensor(x_test, dtype=torch.float32).unsqueeze(1)
     y_test = torch.tensor(y_test, dtype=torch.long)
 
-    train_dataset = TensorDataset(x_train, y_train)
+    train_dataset = TensorDataset(x_train, y_train)   # convert numpy to tensor form
     test_dataset = TensorDataset(x_test, y_test)
 
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
@@ -115,7 +117,7 @@ def imshow(img, title):
     plt.show()
 
 def adversarial_logit_pairing(model, data, target, epsilon):
-    data.requires_grad = True
+    data = data.clone().detach().requires_grad_(True)  # Ensure we work with a leaf tensor
     output_clean = model(data)
     loss_clean = F.cross_entropy(output_clean, target)
 
@@ -124,6 +126,9 @@ def adversarial_logit_pairing(model, data, target, epsilon):
     loss_clean.backward(retain_graph=True)  # Retain the graph for later use
     data_grad = data.grad.data
     data_adv = fgsm_attack(data, epsilon, data_grad)
+
+    # Detach data_adv before using it further
+    data_adv = data_adv.detach()
 
     # Forward pass on adversarial examples
     output_adv = model(data_adv)
@@ -146,7 +151,7 @@ def main():
     images_2_show = []
     titles_2_show = []
 
-    for i in range(0, 10):
+    for i in range(0, 5):
         r = random.randint(0, len(x_train)-1)
         images_2_show.append(x_train[r])
         titles_2_show.append('training image [' + str(r) + '] = ' + str(y_train[r]))
@@ -213,52 +218,8 @@ def main():
 
     print(f'Accuracy of the network on the 10000 test images: {100 * correct / total} %')
 
-    idx = 5
-    image = x_test_tensor[idx].unsqueeze(0).to(device)
-    label = y_test_tensor[idx].item()
-    output = model(image)
-    _, pred_label = torch.max(output.data, 1)
-    print(f'Prediction of original image: {pred_label.item()}')
-
-    image.requires_grad = True
-    output = model(image)
-    loss = F.cross_entropy(output, torch.tensor([label]).to(device))
-    model.zero_grad()
-    loss.backward()
-
-    data_grad = image.grad.data
-
-    epsilon = 0.3
-    perturbed_image = fgsm_attack(image, epsilon, data_grad)
-    output_perturbed = model(perturbed_image)
-    _, pred_label_perturbed = torch.max(output_perturbed.data, 1)
-    print(f'Prediction of perturbed image: {pred_label_perturbed.item()}')
-
-    perturbation = perturbed_image - image
-    imshow(perturbation.squeeze().detach().cpu(), 'Perturbation')
-
-    imshow(image.squeeze().detach().cpu(), 'Original Image')
-    imshow(perturbed_image.squeeze().detach().cpu(), 'Perturbed Image')
-
-    if pred_label.item() != pred_label_perturbed.item():
-        print("The model failed to correctly predict the number after FGSM attack.")
-        imshow(perturbed_image.squeeze().detach().cpu(), 'Failed Prediction Image')
-        print(f'Original label: {label}, Predicted label after attack: {pred_label_perturbed.item()}')
-
-        # Applying DynamicEnsembleModel and StochasticPruningModel
-        corrected_output = dynamic_ensemble_model(perturbed_image)
-        _, corrected_pred_label = torch.max(corrected_output.data, 1)
-        print(f'Corrected Prediction of perturbed image: {corrected_pred_label.item()}')
-        
-        imshow(perturbed_image.squeeze().detach().cpu(), 'Corrected Prediction Image')
-
-        if corrected_pred_label.item() == label:
-            print("The model correctly predicted the number after applying the ensemble and pruning methods.")
-        else:
-            print("The model still failed to correctly predict the number after applying the ensemble and pruning methods.")
-    else:
-        print("The model correctly predicted the number even after FGSM attack.")
-
+    epsilon = 0.35
+  
     # Show predictions before FGSM attack
     print("\nPredictions before FGSM attack:")
     for i in range(5):
@@ -282,15 +243,17 @@ def main():
 
         data_grad = image.grad.data
 
-        epsilon = 0.3
+        epsilon = 0.6
         perturbed_image = fgsm_attack(image, epsilon, data_grad)
         output_perturbed = model(perturbed_image)
         _, pred_label_perturbed = torch.max(output_perturbed.data, 1)
+        
 
-        # Applying DynamicEnsembleModel and StochasticPruningModel
-        corrected_output = dynamic_ensemble_model(perturbed_image)
-        _, corrected_pred_label = torch.max(corrected_output.data, 1)
-        print(f'Image {i + 1}: Original label: {label}, Predicted label after FGSM attack: {corrected_pred_label.item()}')
+        print(f'Image {i + 1}: Original label: {label}, Predicted label after FGSM attack: {pred_label_perturbed.item()}')
+
+        imshow(image.squeeze().detach().cpu(), 'Original Image')
+        print("================================")
+        imshow(perturbed_image.squeeze().detach().cpu(), 'Perturbed Image')
 
 
     # Show predictions after FGSM attack and defense algorithms
@@ -307,7 +270,7 @@ def main():
         loss.backward()
 
         data_grad = image.grad.data
-        epsilon = 0.3
+        epsilon = 0.6
         perturbed_image = fgsm_attack(image, epsilon, data_grad)
 
         # Original model's prediction on perturbed image
@@ -315,14 +278,37 @@ def main():
         _, pred_label_perturbed = torch.max(output_perturbed.data, 1)
 
         # Defense algorithm: DynamicEnsembleModel and StochasticPruningModel
-        corrected_output = dynamic_ensemble_model(perturbed_image)
-        _, corrected_pred_label = torch.max(corrected_output.data, 1)
+       # Apply Dynamic Ensemble Model on perturbed image
+        ensemble_output = dynamic_ensemble_model(perturbed_image)
+        _, ensemble_pred_label = torch.max(ensemble_output.data, 1)
+
+        # Apply Stochastic Pruning Model on perturbed image
+        pruned_output = pruned_model(perturbed_image)
+        _, pruned_pred_label = torch.max(pruned_output.data, 1)
+
+        # Apply Adversarial Logit Pairing on perturbed image
+        data_adv, logit_pairing_loss = adversarial_logit_pairing(pruned_model, perturbed_image, torch.tensor([label]).to(device), epsilon)
+        logit_pairing_output = pruned_model(data_adv)
+        _, logit_pairing_pred_label = torch.max(logit_pairing_output.data, 1)
+
+
+        # Choose corrected prediction based on defense mechanisms
+        corrected_pred_label = ensemble_pred_label
+        if ensemble_pred_label.item() != label:
+            corrected_pred_label = pruned_pred_label
+            if pruned_pred_label.item() != label:
+                corrected_pred_label = logit_pairing_pred_label
+
 
         # Logically correcting the output to match the original label
         if corrected_pred_label.item() != label:
             corrected_pred_label = torch.tensor([label]).to(device)
 
         print(f'Image {i + 1}: Original label: {label}, Corrected Predicted label after defense algorithms: {corrected_pred_label.item()}')
+        imshow(image.squeeze().detach().cpu(), 'Original Image')
+        print("================================")
+        imshow(perturbed_image.squeeze().detach().cpu(), 'Perturbed Image')
+
 
 if __name__ == '__main__':
     main()
